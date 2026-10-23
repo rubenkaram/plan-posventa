@@ -145,7 +145,7 @@ table.t td.ref{color:var(--auto);font-style:italic;background:var(--auto-bg)}
 <header class="top">
   <div>
     <h1>Plan de Negocios Posventa <span id="hdrAnio">2026</span></h1>
-    <div class="sub"><span id="hdrDealer">KARAM AUTOMOTORES</span> · <span title="Versión del sistema">versión 23-oct 18:10 (VIN único · cruce DMS · turnos Ford)</span></div>
+    <div class="sub"><span id="hdrDealer">KARAM AUTOMOTORES</span> · <span title="Versión del sistema">versión 23-oct 18:20 (VIN único · cruce DMS · turnos Ford)</span></div>
   </div>
   <div class="sp"></div>
   <span id="cloudStatus"></span><span id="saveStatus"></span>
@@ -772,7 +772,7 @@ function parseTurnosWorkbook(wb) {
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, {header: 1, raw: true, defval: null});
   const hi = rows.findIndex(r => r && r.some(c => normH(c) === 'estado de turno'));
-  if (hi < 0) throw new Error('No encontré la columna "Estado de Turno".');
+  if (hi < 0) throw new Error('No reconozco el formato. Se esperan los exports del tablero de turnos Ford: el de turnos de agenda (columna “Estado de Turno”) o el de turnos concluidos por VIN (columnas “VIN GUDB” / “En Agenda”).');
   const H = rows[hi].map(normH), ix = k => H.findIndex(h => h === k || h.startsWith(k));
   const C = {est: ix('estado de turno'), cierre: ix('fecha de cierre'), turno: ix('fecha del turno'), vin: ix('vin'), nps: ix('nps'), fuente: ix('fuente de agendamiento'), com: ix('comentarios'), or: ix('nro. or'), suc: ix('sucursal')};
   const out = {concl: 0, sinOS: 0, otros: 0, fuentes: {}, nps: [], comentarios: [], vins: new Set(), mesCount: {}, sucursal: ''};
@@ -783,7 +783,10 @@ function parseTurnosWorkbook(wb) {
     if (/\(60\)/.test(est) || /^concluido$/i.test(est.replace(/\(\d+\)\s*/, ''))) out.concl++;
     else if (/sin os/i.test(est)) out.sinOS++; else out.otros++;
     const f = String(r[C.fuente] || 'Sin dato'); out.fuentes[f] = (out.fuentes[f] || 0) + 1;
-    if (isNum(r[C.nps])) out.nps.push(r[C.nps]);
+    let nps = r[C.nps];
+    if (nps instanceof Date) nps = Math.round((nps.getTime() - nps.getTimezoneOffset() * 60000 - Date.UTC(1899, 11, 30)) / 86400000);  // celda con formato fecha
+    if (typeof nps === 'string' && nps.trim() !== '' && isFinite(+nps)) nps = +nps;
+    if (isNum(nps) && nps >= 0 && nps <= 10) out.nps.push(nps);
     if (C.com >= 0 && r[C.com]) out.comentarios.push(String(r[C.com]));
     if (r[C.vin]) out.vins.add(String(r[C.vin]).trim().toUpperCase());
     const d = toD(r[C.cierre]) || toD(r[C.turno]);
@@ -1093,8 +1096,8 @@ function renderImportar() {
       <p class="small muted">Al actualizar la lista se recalculan todos los meses importados.</p></div>
     <div class="panel"><h2>3 · Turnos (tablero de turnos Ford)</h2>
       <div id="dropTurnos" class="drop"></div>
-      <p class="small muted">Acepta los dos exports del tablero: el de <b>turnos concluidos por VIN</b> (columnas VIN GUDB / En Agenda) y el de <b>turnos online</b> (Estado de Turno, NPS). Del online se toman los turnos “(60) Concluido”, la fuente (FordPass, Mobile, Web) y las respuestas de satisfacción. El % de turnos online se calcula sobre los “Turnos concluidos” que informa Ford (cargalo en Carga de resultados) o, si no está, sobre los VIN únicos de las OR.</p>
-      ${Object.keys(S.turnos || {}).length ? `<table class="t"><thead><tr><th class="lbl">Mes</th><th>Online concluidos</th><th>Sin OS</th><th>Respuestas</th><th>Satisfacción</th><th style="text-align:left">Archivo</th><th></th></tr></thead><tbody>${Object.keys(S.turnos).map(Number).sort((a, b) => a - b).map(m => { const k = turnosKPI(m); return `<tr><td class="lbl"><b>${MESES[m - 1]}</b></td><td>${k.concl}</td><td>${k.t.sinOS}</td><td>${k.resp}</td><td>${fmtPct(k.sat, 0)}</td><td style="text-align:left">${esc(k.t.file)}</td><td><button class="btn sm danger" data-tdel="${m}">Eliminar</button></td></tr>`; }).join('')}</tbody></table>` : ''}
+      <p class="small muted">Acepta los dos exports del tablero: el de <b>turnos concluidos por VIN</b> (columnas VIN GUDB / En Agenda) y el de <b>turnos de agenda</b> (Estado de Turno, NPS). De la agenda se toman todos los turnos “(60) Concluido”, su fuente (FordPass, Mobile, Web…) y las respuestas de satisfacción. El % de turnos con agenda se calcula sobre los “Turnos concluidos” que informa Ford (cargalo en Carga de resultados) o, si no está, sobre los VIN únicos de las OR.</p>
+      ${Object.keys(S.turnos || {}).length ? `<table class="t"><thead><tr><th class="lbl">Mes</th><th>Turnos agenda concluidos</th><th>Sin OS</th><th>Respuestas</th><th>Satisfacción</th><th style="text-align:left">Archivo</th><th></th></tr></thead><tbody>${Object.keys(S.turnos).map(Number).sort((a, b) => a - b).map(m => { const k = turnosKPI(m); return `<tr><td class="lbl"><b>${MESES[m - 1]}</b></td><td>${k.concl}</td><td>${k.t.sinOS}</td><td>${k.resp}</td><td>${fmtPct(k.sat, 0)}</td><td style="text-align:left">${esc(k.t.file)}</td><td><button class="btn sm danger" data-tdel="${m}">Eliminar</button></td></tr>`; }).join('')}</tbody></table>` : ''}
       ${Object.keys(S.fordConcl || {}).length ? `<h3>Turnos concluidos Ford (por VIN)</h3><table class="t"><thead><tr><th class="lbl">Mes</th><th>VIN concluidos</th><th>Con turno en agenda</th><th style="text-align:left">Archivo</th><th></th></tr></thead><tbody>${Object.keys(S.fordConcl).map(Number).sort((a, b) => a - b).map(m => { const f = S.fordConcl[m]; return `<tr><td class="lbl"><b>${MESES[m - 1]}</b></td><td>${f.vins.length}</td><td>${f.enAgenda}</td><td style="text-align:left">${esc(f.file)}</td><td><button class="btn sm" data-fver="${m}">Ver cruce</button> <button class="btn sm danger" data-fdel="${m}">Eliminar</button></td></tr>`; }).join('')}</tbody></table>` : ''}
     </div>
     <div class="panel"><h2>4 · OR facturadas del DMS (Autologica)</h2>
@@ -1151,7 +1154,7 @@ function renderImportar() {
       if (S.turnos[m] && !(await askConfirm(`${MESES[m - 1]} ya tiene turnos importados. ¿Reemplazar?`))) return;
       t.file = file.name; t.fecha = new Date().toLocaleDateString('es-AR'); delete t.mesCount;
       S.turnos[m] = t; saveState(true); renderImportar();
-      alertMsg(`Turnos de ${MESES[m - 1]}: ${t.concl} online concluidos, ${t.nps.length} respuestas.`);
+      alertMsg(`Turnos de ${MESES[m - 1]}: ${t.concl} turnos de agenda concluidos, ${t.nps.length} respuestas.`);
     } catch (err) { alertMsg('No pude leer el archivo: ' + err.message); }
   });
   dropZone('dropDMS', '<b>Arrastrá acá el listado de OR del DMS</b><br><span class="small muted">.xls exportado de Autologica</span>', async file => {
@@ -1769,9 +1772,9 @@ function renderResumen() {
   const TK = turnosKPI(m);
   if (TK.has) {
     const tile = (v, l, sub) => `<div class="kpi"><div class="v" style="margin-top:0">${v}</div><div class="k">${l}</div>${sub ? `<div class="o">${sub}</div>` : ''}</div>`;
-    h += `<h3 style="margin:18px 0 8px;font-size:13px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.4px">Turnos online y satisfacción — ${MESES[m - 1]}</h3><div class="kpis">
-      ${tile(fmtPct(TK.pctOnline), '% Turnos Online', TK.totalFuente === 'ford' ? 'sobre turnos concluidos Ford' : 'sobre VIN únicos de las OR (cargá el dato Ford en Carga de resultados)')}
-      ${tile(fmtInt(TK.concl), 'Turnos Online Concluídos', Object.entries(TK.t.fuentes).filter(([k]) => k !== 'Sin dato').map(([k, v]) => k + ' ' + v).join(' · '))}
+    h += `<h3 style="margin:18px 0 8px;font-size:13px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.4px">Turnos de agenda Ford y satisfacción — ${MESES[m - 1]}</h3><div class="kpis">
+      ${tile(fmtPct(TK.pctOnline), '% Turnos con agenda Ford', TK.totalFuente === 'ford' ? 'sobre turnos concluidos Ford' : 'sobre VIN únicos de las OR (cargá el dato Ford en Carga de resultados)')}
+      ${tile(fmtInt(TK.concl), 'Turnos agendados concluidos', Object.entries(TK.t.fuentes).filter(([k]) => k !== 'Sin dato').map(([k, v]) => k + ' ' + v).join(' · '))}
       ${tile(fmtInt(TK.total), 'Turnos Concluídos', (TK.totalFuente === 'ford' ? 'tablero Ford' : 'VIN únicos en OR') + (S.ro[m] && S.ro[m].agg.vinTotal ? ' · en las OR: ' + S.ro[m].agg.vinTotal + ' VIN únicos' : ''))}
       ${tile(fmtPct(TK.sat, 0), 'Satisfacción General (OER)', TK.prom ? 'promedio ' + fmtDec(TK.prom, 1) + ' / 5' : '')}
       ${tile(fmtInt(TK.resp), 'Total Respuestas', '')}</div>`;
@@ -2382,7 +2385,7 @@ function exportReportPDF(m) {
     doc.text(`${D.hasRO ? 'OR importadas: ' + S.ro[m].file : 'Sin OR importadas (valores cargados a mano)'}${D.falt.length ? ' · Pendiente de carga: ' + D.falt.join(', ') : ''}`, 10, y, {maxWidth: 190});
     y += 6;
     const TK = turnosKPI(m);
-    if (TK.has) { doc.setFontSize(8.5); doc.setTextColor(20); doc.text(`Turnos online: ${fmtPct(TK.pctOnline)} (${TK.concl} de ${fmtInt(TK.total)} turnos concluidos) · Satisfacción general: ${fmtPct(TK.sat, 0)} (${TK.resp} respuestas)`, 10, y); y += 5; }
+    if (TK.has) { doc.setFontSize(8.5); doc.setTextColor(20); doc.text(`Turnos con agenda Ford: ${fmtPct(TK.pctOnline)} (${TK.concl} de ${fmtInt(TK.total)} turnos concluidos) · Satisfacción general: ${fmtPct(TK.sat, 0)} (${TK.resp} respuestas)`, 10, y); y += 5; }
     const byK = Object.fromEntries(D.rows.filter(x => x.k).map(x => [x.k, x]));
     const colorOf = st => st === 'good' ? [10, 125, 10] : st === 'warn' ? [168, 107, 0] : st === 'bad' ? [194, 47, 47] : [120, 120, 120];
     // tarjetas resumen
