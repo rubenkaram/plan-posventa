@@ -145,7 +145,7 @@ table.t td.ref{color:var(--auto);font-style:italic;background:var(--auto-bg)}
 <header class="top">
   <div>
     <h1>Plan de Negocios Posventa <span id="hdrAnio">2026</span></h1>
-    <div class="sub" id="hdrDealer">KARAM AUTOMOTORES</div>
+    <div class="sub"><span id="hdrDealer">KARAM AUTOMOTORES</span> · <span title="Versión del sistema">versión 23-oct (VIN único · garantía exclusiva · cruce DMS)</span></div>
   </div>
   <div class="sp"></div>
   <span id="cloudStatus"></span><span id="saveStatus"></span>
@@ -252,7 +252,9 @@ function defaultState() {
       payGar: 'W', payInt: 'I',
       costWarnFactor: 3,
       repDoble: false,
-      soloVinReconocido: true
+      soloVinReconocido: true,
+      usarDMS: true,
+      garSoloExclusiva: true
     },
     obj: sd.obj,
     res: sd.res,         // carga manual por mes ('1'..'12')
@@ -277,8 +279,9 @@ function loadState() {
     Object.assign(S.cfg.smOverride, {COMBO1: 'SM11+', COMBO2: 'SM11+', VS00: 'SM11+'});
     S.cfg.gudb = 1; S._reagg = true;
   }
-  if (S.ro && Object.values(S.ro).some(r => r.agg && !r.agg.porVin)) S._reagg = true;
+  if (S.ro && Object.values(S.ro).some(r => r.agg && r.agg.aggV !== 4)) S._reagg = true;
   S.turnos = S.turnos || {};
+  S.dms = S.dms || {};
   try {
     const v = localStorage.getItem(VIN_KEY);
     if (v) VINS = new Set(v.split(','));
@@ -340,6 +343,7 @@ function parseROWorkbook(wb) {
   const C = {
     ro: 0,
     cierre: find(h => h.includes('fecha de cierre'), 3),
+    apertura: find(h => h.includes('fecha apertura'), 2),
     vin: find(h => h.includes('vin del vehiculo'), 5),
     rec: find(h => h.includes('reconocido por ford'), 6),
     pay: find(h => h.includes('tipo de pago'), 14),
@@ -380,7 +384,7 @@ function parseROWorkbook(wb) {
     const opOrig = String(r[C.opOrig] || '').trim().toUpperCase();
     const op = String(r[C.op] || '').trim().toUpperCase();
     lines.push([ro, vin, String(r[C.pay] || '').trim().toUpperCase(), opOrig && opOrig !== 'UNKNOWN' ? opOrig : op,
-      nz(r[C.cost]), nz(r[C.price]), nz(r[C.mo]), String(r[C.desc] || r[C.opDesc] || '').trim().slice(0, 40), nz(r[C.qty]), String(r[C.rec] || 'S').trim().toUpperCase() || 'S']);
+      nz(r[C.cost]), nz(r[C.price]), nz(r[C.mo]), String(r[C.desc] || r[C.opDesc] || '').trim().slice(0, 40), nz(r[C.qty]), String(r[C.rec] || 'S').trim().toUpperCase() || 'S', (d0 => d0 ? d0.toISOString().slice(0, 10) : '')(toDate(r[C.apertura]))]);
   }
   if (!periodo) {
     const best = Object.entries(mesCount).sort((a, b) => b[1] - a[1])[0];
@@ -390,7 +394,27 @@ function parseROWorkbook(wb) {
 }
 
 // lines: [ro, vin, pay, op, extCost, extPrice, mo, desc, qty]
-function aggregateRO(lines) {
+const roKey = x => String(x || '').replace(/\D/g, '').slice(-8);
+function gudbRoSet(m) { const r = S.ro && S.ro[m]; return new Set(((r && r.lines) || []).map(l => roKey(l[0]))); }
+// OR facturadas en el DMS que no aparecen en GUDB (ni en ese mes ni en meses anteriores)
+function dmsOnly(m, extraLines) {
+  const d = S.dms && S.dms[m]; if (!d) return [];
+  const seen = new Set();
+  for (let k = 1; k <= m; k++) gudbRoSet(k).forEach(x => seen.add(x));
+  if (extraLines) extraLines.forEach(l => seen.add(roKey(l[0])));
+  return d.ors.filter(o => !seen.has(o.or));
+}
+function dmsClaimedBefore(m) { const s = new Set(); for (let k = 1; k < m; k++) dmsOnly(k).forEach(o => s.add(o.or)); return s; }
+function aggregateRO(linesIn, m) {
+  let lines = linesIn;
+  let dmsAdded = [];
+  if (m && S.cfg.usarDMS !== false) {
+    const claimed = dmsClaimedBefore(m);
+    if (claimed.size) lines = lines.filter(l => !claimed.has(roKey(l[0])));
+    const d = S.dms && S.dms[m];
+    dmsAdded = dmsOnly(m, linesIn).filter(o => ((d.cat || {})[o.or] || 'RG') !== 'NO');
+    lines = lines.concat(dmsAdded.map(o => { const c = (d.cat || {})[o.or] || 'RG'; return [o.or, o.vin, 'C', c === 'RG' ? 'DMS-RG' : c, 0, 0, 0, 'OR del DMS sin GUDB', 0, 'S', o.fecha || '']; }));
+  }
   const emptyM = () => ({pasos: 0, mo: 0, rep: 0, repCosto: 0});
   const cats = {}; Object.keys(CAT_NAMES).forEach(k => cats[k] = emptyM());
   const sm = {own: {}, vis: {}};
@@ -457,7 +481,8 @@ function aggregateRO(lines) {
       const cl = PRIO.find(c => V.cats.has(c));
       pasoCats = pasoCats.filter(c => !cliente.includes(c) || c === cl);
     }
-    // si el VIN sólo compró repuestos (sin MO) y no tiene otro trabajo de cliente, no es paso
+    // garantía: si la unidad además hizo trabajos a cargo del cliente, el paso va a SM / Reparaciones (no a Garantía)
+    if (S.cfg.garSoloExclusiva !== false && pasoCats.some(c => cliente.includes(c))) pasoCats = pasoCats.filter(c => c !== 'GAR');
     pasoCats.forEach(c => { cats[c].pasos++; });
     // importes a la categoría “de paso” del VIN (los de categorías de cliente no contadas se suman a la elegida)
     const clienteCat = pasoCats.find(c => cliente.includes(c));
@@ -478,16 +503,17 @@ function aggregateRO(lines) {
     pasoCats.filter(c => c !== 'MANT').forEach(c => { cat2[own][c === 'REP' ? 'RG' : c].pasos++; });
   }
   const vinTaller = [...vinCat.values()].filter(V => V.cats.has('MANT') || V.cats.has('REP')).length;
-  return {cats, sm, cat2, codes, warnings, nOR: ros.size, nLines: lines.length, ownMant, vinTotal: vinAll.size, vinTaller, porVin: true};
+  return {cats, sm, cat2, codes, warnings, nOR: ros.size, nLines: lines.length, ownMant, vinTotal: vinAll.size, vinTaller, porVin: true, aggV: 4, dmsAdded: dmsAdded.length};
 }
 function reaggregateAll() {
-  Object.values(S.ro).forEach(r => { if (r.lines) r.agg = aggregateRO(r.lines); });
+  Object.entries(S.ro).forEach(([m, r]) => { if (r.lines) r.agg = aggregateRO(r.lines, +m); });
 }
 
 /* ---------- valores de resultado (manual ?? automático OR) ---------- */
 const AUTO_FIELDS = {
   pasosMant: a => a.cats.MANT.pasos,
-  pasosRep: a => a.cats.REP.pasos,
+  // modo “todas las unidades”: Reparaciones = todos los VIN únicos que no hicieron SM (incluye garantía, internos, C&P y accesorios)
+  pasosRep: a => S.cfg.tallerTodos && isNum(a.vinTotal) ? a.vinTotal - a.cats.MANT.pasos : a.cats.REP.pasos,
   pasosCyp: a => a.cats.CYP.pasos,
   pasosAcc: a => a.cats.ACC.pasos,
   pasosGar: a => a.cats.GAR.pasos,
@@ -780,6 +806,49 @@ function turnosKPI(m) {
     sat: n ? sat / n : null, resp: n, prom: n ? t.nps.reduce((x, y) => x + y, 0) / n : null, t};
 }
 
+/* ---------- listado de OR facturadas del DMS (Autologica: Informe resumen de órdenes de reparación) ---------- */
+function parseDMSWorkbook(wb) {
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, {header: 1, raw: true, defval: ''});
+  let periodo = null, taller = '', filtro = '';
+  const ors = [];
+  for (const r of rows) {
+    const txt = r.map(x => String(x)).join(' ');
+    const mp = txt.match(/Fecha entre\s+(\d{1,2})\/(\d{1,2})\/(\d{4})\s+y\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (mp && !periodo) { periodo = {mes: +mp[2], anio: +mp[3], desde: `${mp[3]}-${mp[2].padStart(2, '0')}-${mp[1].padStart(2, '0')}`, hasta: `${mp[6]}-${mp[5].padStart(2, '0')}-${mp[4].padStart(2, '0')}`}; filtro = txt.trim(); }
+    if (String(r[1]).trim() === 'Taller:') { taller = [r[2], r[4]].filter(Boolean).join(' - '); continue; }
+    const orCell = r.find(x => /^\s*\d{2,4}\s*-\s*\d{6,}\s*$/.test(String(x)));
+    if (!orCell) continue;
+    const vin = String(r.find(x => /^[A-HJ-NPR-Z0-9]{17}$/i.test(String(x).trim())) || '').trim().toUpperCase();
+    const iOr = r.indexOf(orCell);
+    const fNum = r.slice(iOr + 1).find(x => x instanceof Date || (typeof x === 'number' && x > 40000 && x < 60000));
+    const pad = n => String(n).padStart(2, '0');
+    const fecha = fNum instanceof Date ? `${fNum.getFullYear()}-${pad(fNum.getMonth() + 1)}-${pad(fNum.getDate())}`
+      : fNum ? (d => d ? `${d.y}-${pad(d.m)}-${pad(d.d)}` : '')(XLSX.SSF.parse_date_code(fNum)) : '';
+    const texts = r.filter(x => typeof x === 'string' && x.trim());
+    const iTxt = texts.indexOf(String(orCell));
+    ors.push({or: roKey(orCell), orRaw: String(orCell).trim(), vin, fecha, cliente: texts[iTxt + 2] || '', modelo: texts[iTxt + 3] || '', taller, estado: texts.find(x => /FACTURAD|ABIERT|CERRAD/i.test(x)) || ''});
+  }
+  return {periodo, ors, filtro};
+}
+// cruce DMS ↔ GUDB de un mes
+function dmsCruce(m) {
+  const d = S.dms && S.dms[m]; if (!d) return null;
+  const r = S.ro[m]; const lines = (r && r.lines) || [];
+  const byRo = {};
+  lines.forEach(l => { const k = roKey(l[0]); (byRo[k] = byRo[k] || []).push(l); });
+  const enGudb = d.ors.filter(o => byRo[o.or]);
+  const enGudbSinC = enGudb.filter(o => !byRo[o.or].some(l => l[2] === 'C'));
+  const soloDms = dmsOnly(m);
+  const prev = new Set(); for (let k = 1; k < m; k++) gudbRoSet(k).forEach(x => prev.add(x));
+  const enOtroMes = d.ors.filter(o => !byRo[o.or] && prev.has(o.or));
+  const dmsSet = new Set(d.ors.map(o => o.or));
+  const soloGudb = Object.entries(byRo).filter(([k, L]) => L.some(l => l[2] === 'C') && !dmsSet.has(k))
+    .map(([k, L]) => ({or: k, vin: L[0][1], apertura: L[0][10] || '', ops: [...new Set(L.filter(l => l[2] === 'C').map(l => l[3]))].join(', ')}));
+  const vinGudbC = new Set(lines.filter(l => l[2] === 'C').map(l => l[1]));
+  return {d, enGudb, enGudbSinC, soloDms, enOtroMes, soloGudb, vinGudbC, vinDms: new Set(d.ors.map(o => o.vin)).size};
+}
+
 /* ============================================================
    Interfaz: pestañas, plan, carga, importación, objetivos, pasos
    ============================================================ */
@@ -940,7 +1009,7 @@ function aggTables(agg) {
     const c = agg.cats[k];
     h += `<tr><td class="lbl">${CAT_NAMES[k]}</td><td><b>${fmtInt(c.pasos)}</b></td><td>${fmtInt(c.nOR || 0)}</td><td>${fmtMoney(c.mo)}</td><td>${fmtMoney(c.rep)}</td><td>${fmtMoney(c.repCosto)}</td></tr>`;
   }
-  h += `</tbody></table><p class="small muted">${agg.nOR} OR · ${agg.nLines} líneas · <b>${agg.vinTotal} VIN únicos</b> (${agg.vinTaller} en Mantenimiento + Reparaciones). Los pasos se cuentan por <b>VIN único</b>: si una unidad tuvo varias OR en el mes cuenta una sola vez. A cargo del cliente, cada VIN va a una sola categoría (prioridad: Mantenimiento › C&P › Reparación › Accesorios); garantía e internos se cuentan aparte.</p></div>`;
+  h += `</tbody></table><p class="small muted">${agg.nOR} OR · ${agg.nLines} líneas · <b>${agg.vinTotal} VIN únicos</b> (${agg.vinTaller} en Mantenimiento + Reparaciones). <br>Desglose de VIN únicos: ${(() => { const c = agg.cats; const cli = c.MANT.pasos + c.REP.pasos + c.CYP.pasos + c.ACC.pasos; return `cargo cliente ${cli} (SM ${c.MANT.pasos} · RG ${c.REP.pasos} · C&P ${c.CYP.pasos} · Acc. ${c.ACC.pasos}) + garantía, internos y sólo repuestos ${agg.vinTotal - cli} = ${agg.vinTotal}`; })()}.<br>Los pasos se cuentan por <b>VIN único</b>: si una unidad tuvo varias OR en el mes cuenta una sola vez. A cargo del cliente, cada VIN va a una sola categoría (prioridad: Mantenimiento › C&P › Reparación › Accesorios); garantía cuenta sólo las unidades que vinieron únicamente por garantía (si además hicieron trabajo del cliente, suman en SM o Reparación); internos se cuentan aparte.</p></div>`;
   h += `<div><h3>Servicios de mantenimiento por grupo SM</h3><table class="t"><thead><tr><th class="lbl">Grupo</th><th>Vendidos x conc.</th><th>Visitantes</th><th>Total</th><th>MO total</th><th>Rep. total</th></tr></thead><tbody>`;
   let to = 0, tv = 0, tm = 0, tr = 0;
   SM_LABELS.forEach(l => {
@@ -985,6 +1054,11 @@ function renderImportar() {
       <div id="dropTurnos" class="drop"></div>
       <p class="small muted">Se toman los turnos “(60) Concluido”, la fuente (FordPass, Mobile, Web) y las respuestas de satisfacción. El % de turnos online se calcula sobre los “Turnos concluidos” que informa Ford (cargalo en Carga de resultados) o, si no está, sobre los VIN únicos de las OR.</p>
       ${Object.keys(S.turnos || {}).length ? `<table class="t"><thead><tr><th class="lbl">Mes</th><th>Online concluidos</th><th>Sin OS</th><th>Respuestas</th><th>Satisfacción</th><th style="text-align:left">Archivo</th><th></th></tr></thead><tbody>${Object.keys(S.turnos).map(Number).sort((a, b) => a - b).map(m => { const k = turnosKPI(m); return `<tr><td class="lbl"><b>${MESES[m - 1]}</b></td><td>${k.concl}</td><td>${k.t.sinOS}</td><td>${k.resp}</td><td>${fmtPct(k.sat, 0)}</td><td style="text-align:left">${esc(k.t.file)}</td><td><button class="btn sm danger" data-tdel="${m}">Eliminar</button></td></tr>`; }).join('')}</tbody></table>` : ''}
+    </div>
+    <div class="panel"><h2>4 · OR facturadas del DMS (Autologica)</h2>
+      <div id="dropDMS" class="drop"></div>
+      <p class="small muted">Autologica → Informes de servicio → Gerenciales → Informe resumen de órdenes de reparación (facturadas, a cargo del cliente). Se cruza OR por OR con el reporte de GUDB: las que facturaste y no figuran en GUDB se suman como pasos de cargo cliente en la categoría que elijas.</p>
+      ${Object.keys(S.dms || {}).length ? `<table class="t"><thead><tr><th class="lbl">Mes</th><th>OR DMS</th><th>En GUDB</th><th>Sólo DMS</th><th style="text-align:left">Archivo</th><th></th></tr></thead><tbody>${Object.keys(S.dms).map(Number).sort((a, b) => a - b).map(m => { const c = dmsCruce(m); return `<tr><td class="lbl"><b>${MESES[m - 1]}</b></td><td>${c.d.ors.length}</td><td>${c.enGudb.length}</td><td>${c.soloDms.length}</td><td style="text-align:left">${esc(c.d.file)}</td><td><button class="btn sm" data-dver="${m}">Ver cruce</button> <button class="btn sm danger" data-ddel="${m}">Eliminar</button></td></tr>`; }).join('')}</tbody></table>` : ''}
     </div></div>`;
   if (P) {
     h += `<div class="panel" style="border-color:var(--brand-2)"><h2>Vista previa: ${esc(P.file)}</h2>
@@ -1014,7 +1088,7 @@ function renderImportar() {
       const wb = await readFileAsWB(file);
       const {lines, periodo} = parseROWorkbook(wb);
       if (!lines.length) throw new Error('El archivo no tiene líneas de OR.');
-      UI.pendingRO = {file: file.name, lines, periodo, agg: aggregateRO(lines)};
+      UI.pendingRO = {file: file.name, lines, periodo, agg: aggregateRO(lines, periodo && periodo.mes)};
       renderImportar();
     } catch (err) { alertMsg('No pude leer el archivo: ' + err.message); }
   });
@@ -1026,6 +1100,17 @@ function renderImportar() {
       t.file = file.name; t.fecha = new Date().toLocaleDateString('es-AR'); delete t.mesCount;
       S.turnos[m] = t; saveState(true); renderImportar();
       alertMsg(`Turnos de ${MESES[m - 1]}: ${t.concl} online concluidos, ${t.nps.length} respuestas.`);
+    } catch (err) { alertMsg('No pude leer el archivo: ' + err.message); }
+  });
+  dropZone('dropDMS', '<b>Arrastrá acá el listado de OR del DMS</b><br><span class="small muted">.xls exportado de Autologica</span>', async file => {
+    try {
+      const t = parseDMSWorkbook(await readFileAsWB(file));
+      if (!t.ors.length) throw new Error('No encontré órdenes de reparación en el archivo.');
+      const m = t.periodo ? t.periodo.mes : lastMonthWithData();
+      if (S.dms[m] && !(await askConfirm(`${MESES[m - 1]} ya tiene un listado del DMS. ¿Reemplazarlo?`))) return;
+      S.dms[m] = {file: file.name, fecha: new Date().toLocaleDateString('es-AR'), periodo: t.periodo, filtro: t.filtro, ors: t.ors, cat: (S.dms[m] && S.dms[m].cat) || {}};
+      reaggregateAll(); saveState(true); UI.dmsVer = m; renderImportar();
+      alertMsg(`DMS ${MESES[m - 1]}: ${t.ors.length} OR facturadas.`);
     } catch (err) { alertMsg('No pude leer el archivo: ' + err.message); }
   });
   dropZone('dropVIN', '<b>Arrastrá acá el Excel de unidades vendidas</b><br><span class="small muted">Se toma la columna VIN</span>', async file => {
@@ -1042,7 +1127,7 @@ function renderImportar() {
       if (!set.size) throw new Error('No encontré VINs en el archivo.');
       VINS = set; saveVins();
       S.vinInfo = {file: file.name, n: set.size, fecha: new Date().toLocaleDateString('es-AR')};
-      reaggregateAll(); if (UI.pendingRO) UI.pendingRO.agg = aggregateRO(UI.pendingRO.lines);
+      reaggregateAll(); if (UI.pendingRO) UI.pendingRO.agg = aggregateRO(UI.pendingRO.lines, UI.pendingRO.periodo && UI.pendingRO.periodo.mes);
       saveState(true); renderImportar();
     } catch (err) { alertMsg('No pude leer el archivo: ' + err.message); }
   });
@@ -1051,15 +1136,18 @@ function renderImportar() {
     $('#btnSaveRO').onclick = async () => {
       const m = +$('#selMesRO').value;
       if (S.ro[m] && !(await askConfirm(`${MESES[m - 1]} ya tiene una importación (${S.ro[m].file}). ¿Reemplazarla?`))) return;
-      S.ro[m] = {file: P.file, fecha: new Date().toLocaleDateString('es-AR'), periodo: P.periodo, lines: P.lines, agg: aggregateRO(P.lines)};
+      S.ro[m] = {file: P.file, fecha: new Date().toLocaleDateString('es-AR'), periodo: P.periodo, lines: P.lines, agg: null}; reaggregateAll();
       UI.pendingRO = null; saveState(true); renderImportar();
       alertMsg(`Importación guardada en ${MESES[m - 1]}. Completá costos de MO y repuestos en “Carga de resultados”.`);
     };
     $$('#prevBody select[data-op]').forEach(s => s.onchange = () => {
       S.cfg.opCat[s.dataset.op] = s.value; saveState();
-      reaggregateAll(); P.agg = aggregateRO(P.lines); renderImportar();
+      reaggregateAll(); P.agg = aggregateRO(P.lines, P.periodo && P.periodo.mes); renderImportar();
     });
   }
+  $$('#tab-importar [data-ddel]').forEach(b => b.onclick = async () => { if (await askConfirm('¿Eliminar el listado del DMS de ' + MESES[b.dataset.ddel - 1] + '?')) { delete S.dms[b.dataset.ddel]; reaggregateAll(); saveState(true); renderImportar(); } });
+  $$('#tab-importar [data-dver]').forEach(b => b.onclick = () => { UI.dmsVer = +b.dataset.dver; renderImportar(); });
+  if (UI.dmsVer && S.dms[UI.dmsVer]) renderDMSCruce(UI.dmsVer);
   $$('#tab-importar [data-tdel]').forEach(b => b.onclick = async () => { if (await askConfirm('¿Eliminar los turnos de ' + MESES[b.dataset.tdel - 1] + '?')) { delete S.turnos[b.dataset.tdel]; saveState(true); renderImportar(); } });
   $$('#tab-importar [data-del]').forEach(b => b.onclick = async () => {
     const m = b.dataset.del;
@@ -1365,6 +1453,9 @@ function renderConfig() {
    <div class="row" style="margin-top:8px"><input type="text" id="opCode" placeholder="Código, ej. CARRO1" style="width:150px"><select id="opGrp">${['CYP', 'ACC', 'INT', 'SREP', 'REP'].map(x => `<option value="${x}">${CAT_NAMES[x]}</option>`).join('')}</select><button class="btn" id="opAdd">Agregar</button></div>
    <div class="row small" style="margin-top:12px"><label class="fld">Tipo de pago garantía<input type="text" id="payGar" value="${esc(S.cfg.payGar)}" style="width:60px"></label><label class="fld">Tipo de pago interno<input type="text" id="payInt" value="${esc(S.cfg.payInt)}" style="width:60px"></label><label class="fld">Alerta si costo &gt; precio ×<input type="text" id="cwf" value="${S.cfg.costWarnFactor}" style="width:60px"></label></div>
    <h3>Conteo de pasos</h3><p class="small muted" style="margin:0 0 6px">Los pasos se cuentan por VIN único en el mes.</p>
+   <label class="small" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px"><input type="checkbox" id="usarDMS" ${S.cfg.usarDMS !== false ? 'checked' : ''}><span><b>Sumar las OR facturadas en el DMS que no figuran en GUDB</b> (requiere importar el listado de Autologica en “Importar OR”, recuadro 4).</span></label>
+   <label class="small" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px"><input type="checkbox" id="garExcl" ${S.cfg.garSoloExclusiva !== false ? 'checked' : ''}><span><b>Garantía cuenta sólo las unidades que vinieron únicamente por garantía.</b> Si la unidad además hizo un trabajo a cargo del cliente, el paso suma en SM o Reparación General. La venta de MO de garantía se sigue sumando en Garantía.</span></label>
+   <label class="small" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px"><input type="checkbox" id="tallerTodos" ${S.cfg.tallerTodos ? 'checked' : ''}><span><b>Pasos por taller = todas las unidades del mes</b> (como el tablero Ford): Reparaciones cuenta todos los VIN únicos que no hicieron SM, incluidos garantía, internos, C&amp;P y accesorios. Desactivado: sólo trabajos a cargo del cliente de reparación general, como el plan original.</span></label>
    <label class="small" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px"><input type="checkbox" id="soloRec" ${S.cfg.soloVinReconocido !== false ? 'checked' : ''}><span>Contar sólo VIN reconocidos por Ford (columna “VIN reconocido por Ford” = S).</span></label><label class="small" style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" id="repDoble" ${S.cfg.repDoble ? 'checked' : ''}><span>Permitir que un mismo VIN cuente en Mantenimiento <b>y</b> en Reparación General cuando además del SM tuvo otros trabajos a cargo del cliente. Desactivado: cada VIN cuenta en una sola categoría de cliente.</span></label></div></div>
   <div class="panel"><h2>Respaldo de datos</h2><p class="small">Los datos quedan guardados en este navegador. Exportá un respaldo cada mes (o para pasarlo a otra PC) e importalo desde acá.</p>
    <div class="row"><button class="btn primary" id="bkExp">⬇ Exportar respaldo (.json)</button><button class="btn" id="bkImp">⬆ Importar respaldo</button><button class="btn danger" id="bkReset">Restablecer datos originales</button></div></div>`;
@@ -1378,6 +1469,9 @@ function renderConfig() {
   $('#payGar').onchange = e => { S.cfg.payGar = e.target.value.trim().toUpperCase(); after(); };
   $('#payInt').onchange = e => { S.cfg.payInt = e.target.value.trim().toUpperCase(); after(); };
   $('#cwf').onchange = e => { S.cfg.costWarnFactor = parseNum(e.target.value) || 3; after(); };
+  $('#usarDMS').onchange = e => { S.cfg.usarDMS = e.target.checked; after(); alertMsg('Pasos recalculados.'); };
+  $('#garExcl').onchange = e => { S.cfg.garSoloExclusiva = e.target.checked; after(); alertMsg('Pasos recalculados.'); };
+  $('#tallerTodos').onchange = e => { S.cfg.tallerTodos = e.target.checked; after(); alertMsg('Pasos por taller recalculados.'); };
   $('#soloRec').onchange = e => { S.cfg.soloVinReconocido = e.target.checked; after(); };
   $('#repDoble').onchange = e => { S.cfg.repDoble = e.target.checked; after(); alertMsg('Pasos recalculados en todos los meses importados.'); };
   $('#bkExp').onclick = () => {
@@ -1391,7 +1485,8 @@ function renderConfig() {
       f.text().then(t => {
         const d = JSON.parse(t);
         if (!d.state || d.state.v !== 1) throw new Error('formato');
-        S = d.state; if (d.vins) { VINS = new Set(d.vins); saveVins(); }
+        S = d.state; S.turnos = S.turnos || {}; if (d.vins) { VINS = new Set(d.vins); saveVins(); }
+        reaggregateAll(); UI.mesReporte = null; UI.pasosMes = null;
         saveState(true); refreshHeader(); alertMsg('Respaldo importado.'); renderConfig();
       }).catch(() => alertMsg('El archivo no es un respaldo válido.'));
       inp.value = '';
@@ -1484,6 +1579,38 @@ function renderPasosAnual() {
   $('#chkCorto').onchange = e => { UI.pasosCols = e.target.checked ? 'corto' : 'full'; renderPasos(); };
 }
 
+function renderDMSCruce(m) {
+  const c = dmsCruce(m); if (!c) return;
+  const cats = (S.dms[m].cat = S.dms[m].cat || {});
+  const a = S.ro[m] && S.ro[m].agg;
+  const vinYa = new Set(c.vinGudbC);
+  const opts = (or) => { const cur = cats[or] || 'RG'; return [['RG', 'Reparación General'], ...SM_LABELS.map(l => [l, 'Mantenimiento ' + l]), ['NO', 'No contar']].map(([v, t]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${t}</option>`).join(''); };
+  let h = `<h3>Cruce DMS ↔ GUDB — ${MESES[m - 1]}</h3>
+   <div class="kpis" style="margin-bottom:12px">
+    <div class="kpi"><div class="v" style="margin-top:0">${c.d.ors.length}</div><div class="k">OR facturadas cargo cliente (DMS)</div><div class="o">${c.vinDms} VIN únicos</div></div>
+    <div class="kpi"><div class="v" style="margin-top:0">${c.enGudb.length}</div><div class="k">Están en GUDB</div><div class="o">${c.enGudbSinC.length ? c.enGudbSinC.length + ' figuran en GUDB sin cargo cliente' : 'todas con cargo cliente'}</div></div>
+    <div class="kpi"><div class="v" style="margin-top:0">${c.soloDms.length}</div><div class="k">Facturadas y NO están en GUDB</div><div class="o">${S.cfg.usarDMS !== false ? 'se suman como pasos de cargo cliente' : 'no se suman (opción desactivada)'}</div></div>
+    <div class="kpi"><div class="v" style="margin-top:0">${c.soloGudb.length}</div><div class="k">En GUDB con cargo cliente y no en este DMS</div><div class="o">GUDB toma la fecha de cierre; el DMS, la de apertura</div></div>
+   </div>`;
+  if (c.soloDms.length) {
+    h += `<h3>OR facturadas que no están en GUDB (elegí dónde suman)</h3><div class="tw" style="max-height:none"><table class="t" id="tblDmsSolo"><thead><tr><th class="lbl">OR</th><th>Apertura</th><th style="text-align:left">VIN</th><th style="text-align:left">Cliente</th><th style="text-align:left">Modelo</th><th style="text-align:left">Suma como</th><th style="text-align:left">Observación</th></tr></thead><tbody>
+      ${c.soloDms.map(o => `<tr><td class="lbl">${esc(o.orRaw || o.or)}</td><td>${esc(o.fecha)}</td><td style="text-align:left">${esc(o.vin)}</td><td style="text-align:left">${esc(o.cliente)}</td><td style="text-align:left">${esc(o.modelo)}</td><td class="in" style="text-align:left"><select data-dcat="${o.or}">${opts(o.or)}</select></td><td style="text-align:left" class="small">${vinYa.has(o.vin) ? '<span class="pill">VIN ya contado este mes: no suma otro paso</span>' : (c.soloDms.filter(x => x.vin === o.vin).length > 1 ? '<span class="pill">VIN con más de una OR: suma 1 paso</span>' : '')}</td></tr>`).join('')}
+      </tbody></table></div>`;
+  }
+  if (c.enOtroMes.length) h += `<p class="small muted">${c.enOtroMes.length} OR del DMS figuran en GUDB de un mes anterior: ${c.enOtroMes.map(o => o.or).join(', ')}.</p>`;
+  if (c.soloGudb.length) {
+    h += `<h3>OR con cargo cliente en GUDB que no están en este listado del DMS</h3><table class="t"><thead><tr><th class="lbl">OR</th><th>Apertura</th><th style="text-align:left">VIN</th><th style="text-align:left">Trabajos cliente</th><th style="text-align:left">Motivo probable</th></tr></thead><tbody>
+      ${c.soloGudb.map(o => { const ap = o.apertura; const prevMes = ap && +ap.slice(5, 7) !== m; return `<tr><td class="lbl">${esc(o.or)}</td><td>${esc(ap || '—')}</td><td style="text-align:left">${esc(o.vin)}</td><td style="text-align:left">${esc(o.ops)}</td><td style="text-align:left" class="small">${prevMes ? 'Abierta en ' + MESES[+ap.slice(5, 7) - 1] + ': el DMS la lista en ese mes' : 'Revisar en Autologica (otro taller, sin facturar o a cargo de otro)'}</td></tr>`; }).join('')}</tbody></table>`;
+  }
+  if (a) h += `<p class="small">Con este cruce, pasos de cargo cliente de ${MESES[m - 1]}: SM <b>${a.cats.MANT.pasos}</b> · Reparación General <b>${a.cats.REP.pasos}</b> · C&amp;P ${a.cats.CYP.pasos} · Accesorios ${a.cats.ACC.pasos} (incluye ${a.dmsAdded || 0} OR sólo del DMS).</p>`;
+  h += `<div class="row" style="margin-top:8px"><button class="btn" id="btnDmsXls">⬇ Descargar listado del cruce (Excel)</button></div>`;
+  const box = document.createElement('div'); box.className = 'panel'; box.id = 'dmsCruce'; box.innerHTML = h;
+  const old = document.getElementById('dmsCruce'); if (old) old.remove();
+  document.getElementById('tab-importar').appendChild(box);
+  $$('#tblDmsSolo select[data-dcat]').forEach(sel => sel.onchange = () => { cats[sel.dataset.dcat] = sel.value; reaggregateAll(); saveState(); renderImportar(); });
+  $('#btnDmsXls').onclick = () => exportDMSCruce(m);
+}
+
 /* ============================================================
    Reporte del mes y gráficos
    ============================================================ */
@@ -1572,7 +1699,7 @@ function renderResumen() {
     h += `<h3 style="margin:18px 0 8px;font-size:13px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.4px">Turnos online y satisfacción — ${MESES[m - 1]}</h3><div class="kpis">
       ${tile(fmtPct(TK.pctOnline), '% Turnos Online', TK.totalFuente === 'ford' ? 'sobre turnos concluidos Ford' : 'sobre VIN únicos de las OR (cargá el dato Ford en Carga de resultados)')}
       ${tile(fmtInt(TK.concl), 'Turnos Online Concluídos', Object.entries(TK.t.fuentes).filter(([k]) => k !== 'Sin dato').map(([k, v]) => k + ' ' + v).join(' · '))}
-      ${tile(fmtInt(TK.total), 'Turnos Concluídos', TK.totalFuente === 'ford' ? 'tablero Ford' : 'VIN únicos en OR')}
+      ${tile(fmtInt(TK.total), 'Turnos Concluídos', (TK.totalFuente === 'ford' ? 'tablero Ford' : 'VIN únicos en OR') + (S.ro[m] && S.ro[m].agg.vinTotal ? ' · en las OR: ' + S.ro[m].agg.vinTotal + ' VIN únicos' : ''))}
       ${tile(fmtPct(TK.sat, 0), 'Satisfacción General (OER)', TK.prom ? 'promedio ' + fmtDec(TK.prom, 1) + ' / 5' : '')}
       ${tile(fmtInt(TK.resp), 'Total Respuestas', '')}</div>`;
     if (TK.t.comentarios.length) h += `<div class="panel" style="margin-top:12px"><h2>Comentarios de clientes</h2><ul class="small" style="margin:0">${TK.t.comentarios.map(c => `<li>${esc(c)}</li>`).join('')}</ul></div>`;
@@ -2260,6 +2387,20 @@ async function exportReportXLSX(m) {
   } catch (e) { console.error(e); alertMsg('Error al generar el Excel: ' + e.message); }
 }
 
+async function exportDMSCruce(m) {
+  const c = dmsCruce(m); const cats = S.dms[m].cat || {};
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Solo en DMS');
+  ws.columns = [{header: 'OR', key: 'or', width: 18}, {header: 'Apertura', key: 'f', width: 12}, {header: 'VIN', key: 'vin', width: 22}, {header: 'Cliente', key: 'cli', width: 36}, {header: 'Modelo', key: 'mod', width: 18}, {header: 'Suma como', key: 'cat', width: 20}];
+  c.soloDms.forEach(o => ws.addRow({or: o.orRaw || o.or, f: o.fecha, vin: o.vin, cli: o.cliente, mod: o.modelo, cat: {RG: 'Reparación General', NO: 'No contar'}[cats[o.or] || 'RG'] || 'Mantenimiento ' + cats[o.or]}));
+  const w2 = wb.addWorksheet('Solo en GUDB');
+  w2.columns = [{header: 'OR', key: 'or', width: 14}, {header: 'Apertura', key: 'f', width: 12}, {header: 'VIN', key: 'vin', width: 22}, {header: 'Trabajos cliente', key: 'ops', width: 30}];
+  c.soloGudb.forEach(o => w2.addRow({or: o.or, f: o.apertura, vin: o.vin, ops: o.ops}));
+  [ws, w2].forEach(x => { x.getRow(1).font = {bold: true, color: {argb: 'FFFFFFFF'}}; x.getRow(1).fill = HDR_FILL; });
+  const buf = await wb.xlsx.writeBuffer();
+  downloadBlob(new Blob([buf]), `Cruce_DMS_GUDB_${MESES[m - 1]}_${S.meta.anio}.xlsx`);
+}
+
 /* ============================================================
    Guardado en la nube (versión online en claude.ai, capacidad "db")
    - plan/core      : todo el estado salvo las líneas de OR
@@ -2338,6 +2479,7 @@ async function cloudApply(data) {
     S = st;
     S.turnos = S.turnos || {};
     reaggregateAll();
+    if (!UI.mesReporte || !hasResults(UI.mesReporte)) UI.mesReporte = null;
     CLOUD.rev = data.rev;
     CLOUD.coreStr = JSON.stringify(packCore());
     try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) {}
@@ -2430,12 +2572,14 @@ function seedRO() {
   if (typeof SEED_RO === 'undefined' || !SEED_RO) return;
   Object.entries(SEED_RO).forEach(([m, r]) => { if (!S.ro[m]) S.ro[m] = {file: r.file, fecha: r.fecha, periodo: r.periodo, lines: r.lines, agg: null}; });
   reaggregateAll();
+  if (typeof SEED_DMS !== 'undefined') { S.dms = S.dms || {}; Object.entries(SEED_DMS).forEach(([m, d]) => { if (!S.dms[m]) S.dms[m] = d; }); reaggregateAll(); }
   if (typeof SEED_TURNOS !== 'undefined') Object.entries(SEED_TURNOS).forEach(([m, t]) => { if (!S.turnos[m]) S.turnos[m] = t; });
 }
 (function init() {
   loadState();
   if (!localStorage.getItem(STORE_KEY)) seedRO();
-  Object.values(S.ro).forEach(r => { if (!r.agg && r.lines) r.agg = aggregateRO(r.lines); });
+  Object.entries(S.ro).forEach(([m, r]) => { if (!r.agg && r.lines) r.agg = aggregateRO(r.lines, +m); });
+  if (typeof SEED_DMS !== 'undefined' && !S._dmsSeeded) { S.dms = S.dms || {}; Object.entries(SEED_DMS).forEach(([m, d]) => { if (!S.dms[m]) S.dms[m] = d; }); S._dmsSeeded = 1; S._reagg = true; }
   if (S._reagg) { delete S._reagg; reaggregateAll(); }
   if (!S.turnos['9'] && typeof SEED_TURNOS !== 'undefined' && !S._turnosSeeded) { Object.entries(SEED_TURNOS).forEach(([m, t]) => { if (!S.turnos[m]) S.turnos[m] = t; }); S._turnosSeeded = 1; }
   if (typeof SEED_TURNOS !== 'undefined' && !manualVal(9, 'turnosFord') && !S._fordSeeded) { S.res['9'] = S.res['9'] || {}; S.res['9'].turnosFord = 194; S._fordSeeded = 1; }
